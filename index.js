@@ -106,6 +106,7 @@ client.botConfig = {
   qotdApiUrl: process.env.QOTD_API_URL || 'https://openrouter.ai/api/v1/chat/completions',
   qotdApiKey: process.env.QOTD_API_KEY || process.env.OPENROUTER_API_KEY || '',
   qotdModel: process.env.QOTD_MODEL || 'openrouter/free',
+  qotdSubmitRoleId: process.env.QOTD_SUBMIT_ROLE_ID || process.env.MODROLE || '',
   gradeRoleIds: readGradeRoleIds(process.env),
   supportRoleId: process.env.SUPPORT_ROLE_ID || process.env.TOSS_SUPPORT_ROLE_ID || '',
   tossRollId: process.env.TOSS_ROLL || '',

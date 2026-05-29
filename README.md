@@ -50,6 +50,7 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 QOTD_API_KEY=
 QOTD_API_URL=https://openrouter.ai/api/v1/chat/completions
 QOTD_MODEL=openrouter/free
+QOTD_SUBMIT_ROLE_ID=role_id_allowed_to_queue_qotd
 GRADE_ROLE_FRESHMAN_ID=role_id_for_freshman
 GRADE_ROLE_SOPHOMORE_ID=role_id_for_sophomore
 GRADE_ROLE_JUNIOR_ID=role_id_for_junior
@@ -81,6 +82,7 @@ GRADE_ROLE_GRADUATE_ID=role_id_for_graduate
 - `QOTD_API_KEY`: optional dedicated API key just for QOTD requests
 - `QOTD_API_URL`: defaults to OpenRouter chat completions at `https://openrouter.ai/api/v1/chat/completions`
 - `QOTD_MODEL`: defaults to `openrouter/free`
+- `QOTD_SUBMIT_ROLE_ID`: optional role id that can use `/qotd submit`; falls back to `MODROLE`, then `Manage Messages`
 - `GRADE_ROLE_FRESHMAN_ID` through `GRADE_ROLE_GRADUATE_ID`: the five class-role ids used by `/promotegrades`
 
 ## what it does
@@ -103,7 +105,8 @@ GRADE_ROLE_GRADUATE_ID=role_id_for_graduate
 - dead threads get auto-locked after 8 hours with no new messages
 - optional sticky messages can be reposted on a timer in one channel
 - optional York Tech newsletter watching can post new Spartan Review issues as embeds in a channel
-- optional AI-powered daily QOTD can post once a day on an Eastern Time schedule
+- optional QOTD queue can post once a day on an Eastern Time schedule
+- `/qotd submit` lets the configured role add a question to the daily QOTD queue
 - `/promotegrades` lets the server owner roll class roles forward by one year and posts an `@everyone` graduation embed
 
 ## newsletter watcher
@@ -115,7 +118,9 @@ GRADE_ROLE_GRADUATE_ID=role_id_for_graduate
 
 ## qotd
 
-- this uses an API key and defaults to OpenRouter's `openrouter/free` router
+- `/qotd submit question:<text>` adds a question to the daily queue
+- queued questions are sent first, one per day, in submission order
+- if the queue is empty and an API key is configured, the bot falls back to AI generation through OpenRouter's `openrouter/free` router
 - by default it checks every minute and posts once per day at `6:00 PM` Eastern
 - if the bot is offline at exactly 6:00 PM, it will post later the same evening when the bot comes back up
 - if `QOTD_PING_ROLE_ID` is set, that role gets pinged with the question

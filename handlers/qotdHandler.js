@@ -1,9 +1,21 @@
-const { EmbedBuilder, ThreadAutoArchiveDuration } = require('discord.js');
+const {
+  EmbedBuilder,
+  PermissionFlagsBits,
+  ThreadAutoArchiveDuration,
+} = require('discord.js');
 const runtimeStore = require('../utils/runtimeStore');
+const { makeSubmissionId } = require('../utils/idGenerator');
+const {
+  errEmbed,
+  okEmbed,
+  warnBox,
+} = require('../utils/responseEmbeds');
 
 const CHECK_EVERY_MS = 60 * 1000;
 const API_TIMEOUT_MS = 30_000;
 const RECENT_QOTD_LIMIT = 30;
+const MAX_QUEUED_QOTD = 100;
+const MAX_SUBMITTED_QOTD_LENGTH = 180;
 const RETRY_DELAY_MS = 5 * 60 * 1000;
 const MAX_QOTD_ATTEMPTS = 3;
 
@@ -135,6 +147,9 @@ const qotdState = {
   lastPostedDay: savedStuff.qotdState?.lastPostedDay || '',
   lastPostedAt: savedStuff.qotdState?.lastPostedAt || '',
   nextTryAt: savedStuff.qotdState?.nextTryAt || '',
+  queuedQuestions: Array.isArray(savedStuff.qotdState?.queuedQuestions)
+    ? cleanQueuedQuestions(savedStuff.qotdState.queuedQuestions)
+    : [],
   recentQuestions: Array.isArray(savedStuff.qotdState?.recentQuestions)
     ? cleanStoredQuestions(savedStuff.qotdState.recentQuestions)
     : [],
@@ -217,6 +232,35 @@ function cleanStoredQuestions(questions) {
     .map((item) => cleanupQuestion(item))
     .filter((item) => item && !hasPromptLeak(item))
     .slice(0, RECENT_QOTD_LIMIT);
+}
+
+function makeQotdQueueId() {
+  return `QOTD-${makeSubmissionId()}`;
+}
+
+function cleanQueuedQuestions(items) {
+  return items
+    .map((item) => {
+      const oldItem = item && typeof item === 'object' && !Array.isArray(item)
+        ? item
+        : { question: item };
+      const question = cleanupQuestion(oldItem.question || '');
+
+      if (!question || hasPromptLeak(question)) {
+        return null;
+      }
+
+      return {
+        id: typeof oldItem.id === 'string' && oldItem.id ? oldItem.id : makeQotdQueueId(),
+        question,
+        submittedBy: isSnowflake(oldItem.submittedBy) ? oldItem.submittedBy : '',
+        submittedAt: typeof oldItem.submittedAt === 'string' && oldItem.submittedAt
+          ? oldItem.submittedAt
+          : new Date().toISOString(),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, MAX_QUEUED_QOTD);
 }
 
 function getQuestionTokens(question) {
@@ -348,6 +392,96 @@ function isValidQuestion(question) {
 
 function isSnowflake(value) {
   return typeof value === 'string' && /^\d{16,20}$/.test(value);
+}
+
+function hasRoleSomewhere(memberLike, roleId) {
+  if (!memberLike?.roles || !roleId) {
+    return false;
+  }
+
+  if (Array.isArray(memberLike.roles)) {
+    return memberLike.roles.includes(roleId);
+  }
+
+  return memberLike.roles.cache?.has(roleId) || false;
+}
+
+function canSubmitQotd(interaction) {
+  const roleId = interaction.client.botConfig.qotdSubmitRoleId;
+
+  if (roleId) {
+    return hasRoleSomewhere(interaction.member, roleId);
+  }
+
+  return interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages) || false;
+}
+
+function qotdSubmitDeniedText(interaction) {
+  if (interaction.client.botConfig.qotdSubmitRoleId) {
+    return 'You need the configured QOTD submit role for that.';
+  }
+
+  return 'You need `Manage Messages` for that.';
+}
+
+function isQueuedQuestion(question) {
+  const normalized = normalizeQuestion(question);
+
+  if (!normalized) {
+    return false;
+  }
+
+  return qotdState.queuedQuestions.some((item) => normalizeQuestion(item.question) === normalized);
+}
+
+function validateSubmittedQuestion(rawQuestion) {
+  const question = cleanupQuestion(rawQuestion);
+
+  if (!question) {
+    return { error: 'Write the question you want to add to the queue.' };
+  }
+
+  if (question.length < 10) {
+    return { error: 'That question is too short to use as a QOTD.' };
+  }
+
+  if (question.length > MAX_SUBMITTED_QOTD_LENGTH) {
+    return { error: `Keep QOTD submissions under ${MAX_SUBMITTED_QOTD_LENGTH} characters.` };
+  }
+
+  if ((question.match(/\?/g) || []).length !== 1 || !question.endsWith('?')) {
+    return { error: 'Use one clear question, with one question mark at the end.' };
+  }
+
+  if (/[.!]\s+\S/.test(question)) {
+    return { error: 'Keep it to one sentence.' };
+  }
+
+  if (hasPromptLeak(question)) {
+    return { error: 'That looks like prompt text instead of a QOTD.' };
+  }
+
+  if (isRecentQuestion(question)) {
+    return { error: 'That is too close to a recent QOTD. Try a different angle.' };
+  }
+
+  if (isQueuedQuestion(question)) {
+    return { error: 'That question is already in the QOTD queue.' };
+  }
+
+  return { question };
+}
+
+function getNextQueuedQuestion() {
+  return qotdState.queuedQuestions[0] || null;
+}
+
+function removeQueuedQuestion(queueId) {
+  if (!queueId) {
+    return;
+  }
+
+  qotdState.queuedQuestions = qotdState.queuedQuestions.filter((item) => item.id !== queueId);
 }
 
 function parseJsonObject(text) {
@@ -590,10 +724,11 @@ function makeThreadName(question, nowBits) {
   return `qotd ${nowBits.dayKey} - ${shortQuestion}`;
 }
 
-function rememberQuestion(question, dayKey) {
+function rememberQuestion(question, dayKey, queueId = '') {
   qotdState.lastPostedDay = dayKey;
   qotdState.lastPostedAt = new Date().toISOString();
   qotdState.nextTryAt = '';
+  removeQueuedQuestion(queueId);
   qotdState.recentQuestions.unshift(question);
 
   if (qotdState.recentQuestions.length > RECENT_QOTD_LIMIT) {
@@ -620,6 +755,69 @@ function canTryAgainYet() {
 function scheduleRetry() {
   qotdState.nextTryAt = new Date(Date.now() + RETRY_DELAY_MS).toISOString();
   saveQotdState();
+}
+
+async function submitQueuedQotd(interaction, rawQuestion) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({
+      embeds: [warnBox('Wrong Place', 'QOTD submissions can only be queued from inside the server.')],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!interaction.client.botConfig.qotdChannelId) {
+    await interaction.reply({
+      embeds: [errEmbed('Setup Problem', 'Set `QOTD_CHANNEL_ID` before queueing QOTDs.')],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!canSubmitQotd(interaction)) {
+    await interaction.reply({
+      embeds: [warnBox('Nope', qotdSubmitDeniedText(interaction))],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (qotdState.queuedQuestions.length >= MAX_QUEUED_QOTD) {
+    await interaction.reply({
+      embeds: [errEmbed('Queue Full', `The QOTD queue already has ${MAX_QUEUED_QOTD} questions.`)],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const result = validateSubmittedQuestion(rawQuestion);
+
+  if (result.error) {
+    await interaction.reply({
+      embeds: [warnBox('Not Queued', result.error)],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const item = {
+    id: makeQotdQueueId(),
+    question: result.question,
+    submittedBy: interaction.user.id,
+    submittedAt: new Date().toISOString(),
+  };
+
+  qotdState.queuedQuestions.push(item);
+  saveQotdState();
+
+  await interaction.reply({
+    embeds: [okEmbed('QOTD Queued', [
+      `Added this to the daily queue at position ${qotdState.queuedQuestions.length}.`,
+      '',
+      item.question,
+    ])],
+    ephemeral: true,
+  });
 }
 
 async function sendQotd(client, question, nowBits) {
@@ -657,12 +855,16 @@ async function triggerQotd(client, overrides = {}) {
     throw new Error('missing qotd channel id');
   }
 
-  if (!config.qotdApiKey) {
-    throw new Error('missing qotd api key');
+  const nowBits = getEtTimeBits(config.qotdTimezone || 'America/New_York');
+  const queuedQuestion = getNextQueuedQuestion();
+
+  if (!queuedQuestion && !config.qotdApiKey) {
+    throw new Error('missing qotd api key and no queued qotd');
   }
 
-  const nowBits = getEtTimeBits(config.qotdTimezone || 'America/New_York');
-  const question = await askForQotd(config);
+  const question = queuedQuestion
+    ? queuedQuestion.question
+    : await askForQotd(config);
   const previousConfig = client.botConfig;
 
   try {
@@ -672,7 +874,7 @@ async function triggerQotd(client, overrides = {}) {
     client.botConfig = previousConfig;
   }
 
-  rememberQuestion(question, nowBits.dayKey);
+  rememberQuestion(question, nowBits.dayKey, queuedQuestion?.id || '');
 
   return {
     nowBits,
@@ -683,7 +885,7 @@ async function triggerQotd(client, overrides = {}) {
 async function checkQotd(client) {
   const config = client.botConfig;
 
-  if (!config.qotdChannelId || !config.qotdApiKey) {
+  if (!config.qotdChannelId) {
     return;
   }
 
@@ -694,7 +896,13 @@ async function checkQotd(client) {
   }
 
   try {
-    if (!canTryAgainYet()) {
+    const hasQueuedQuestion = qotdState.queuedQuestions.length > 0;
+
+    if (!hasQueuedQuestion && !config.qotdApiKey) {
+      return;
+    }
+
+    if (!hasQueuedQuestion && !canTryAgainYet()) {
       return;
     }
 
@@ -702,14 +910,14 @@ async function checkQotd(client) {
       qotdTimezone: config.qotdTimezone,
     });
   } catch (error) {
-    console.error('qotd generation failed, trying again in 5 minutes');
+    console.error('qotd post failed, trying again in 5 minutes');
     console.error(error);
     scheduleRetry();
   }
 }
 
 function startQotdLoop(client) {
-  if (!client.botConfig.qotdChannelId || !client.botConfig.qotdApiKey) {
+  if (!client.botConfig.qotdChannelId) {
     return;
   }
 
@@ -724,6 +932,7 @@ function startQotdLoop(client) {
 module.exports = {
   buildQotdEmbed,
   checkQotd,
+  submitQueuedQotd,
   triggerQotd,
   startQotdLoop,
 };
